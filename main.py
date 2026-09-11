@@ -15,7 +15,7 @@ from telegram.ext import (
 )
 
 # ----------------- CONFIGURATION ----------------- #
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+BOT_TOKEN = "8853931522:AAEjBv2p_pOLtA0ifEzB2l-3dj9B9sTwZVg"
 GROUP_CHAT_ID = -1004307826630
 # Put your group's public username or invite link here:
 GROUP_LINK = os.environ.get("GROUP_LINK", "https://t.me/c/4307826630") 
