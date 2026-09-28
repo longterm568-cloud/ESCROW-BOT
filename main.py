@@ -196,7 +196,7 @@ async def deal_card_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     bot_app = Application.builder().token(BOT_TOKEN).build()
 
-    bot_app.add_handler(CommandHandler("+deal", approve_deal))
+    bot_app.add_handler(MessageHandler(filters.Regex(r"^\/\+deal$"), approve_deal))
     bot_app.add_handler(MessageHandler(filters.Regex(r"^/deal\d+"), deal_card_command))
     bot_app.add_handler(CallbackQueryHandler(button_callback))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_deal_form))
