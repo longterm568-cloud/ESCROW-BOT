@@ -1,207 +1,208 @@
 import os
 import re
-import threading
-from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
-    CallbackQueryHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
 
 # ----------------- CONFIGURATION ----------------- #
-BOT_TOKEN = "8853931522:AAEjBv2p_pOLtA0ifEzB2l-3dj9B9sTwZVg"
+BOT_TOKEN = "8600761951:AAEIhkCcWvMxFexkrpHbWH_MPP2T42JbsMs"
 
-# Active deals storage
-active_deals = {}
+# In-memory storage for deals
+deals_db = {}
 
-# ----------------- FLASK SERVER (24/7 UPTIME) ----------------- #
-app = Flask(__name__)
+# ----------------- FEES CALCULATOR ----------------- #
+def calculate_fee(amount: float):
+    if amount < 50:
+        return None, None
+    elif 50 <= amount <= 300:
+        fee = 10.0
+    elif 300 < amount <= 1000:
+        fee = round((amount * 0.02), 2)
+    else:
+        fee = round((amount * 0.03), 2)
+    total = amount + fee
+    return fee, total
 
-@app.route("/")
-def home():
-    return "Escrow Bot is Online and Healthy!"
-
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
-
-# ----------------- HELPER FUNCTIONS ----------------- #
-async def get_admin_mentions(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> str:
-    try:
-        admins = await context.bot.get_chat_administrators(chat_id)
-        mentions = []
-        for admin in admins:
-            if not admin.user.is_bot:
-                if admin.user.username:
-                    mentions.append(f"@{admin.user.username}")
-                else:
-                    mentions.append(f"<a href='tg://user?id={admin.user.id}'>{admin.user.first_name}</a>")
-        return " ".join(mentions) if mentions else "Admins"
-    except Exception as e:
-        print(f"Error fetching admins: {e}")
-        return "Admins"
-
-# ----------------- HANDLERS ----------------- #
-async def send_empty_form(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    admins_text = await get_admin_mentions(context, chat_id)
-
-    form_text = (
-        "📋 <b>AURA VAULT ESCROW FORM</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "Deal amount : \n"
-        "Buyer username : \n"
-        "Seller username : \n"
-        "Deal product/service : \n"
-        "Expected time to complete deal : \n\n"
-        "Note : ⚠️ <b>escrow fees are non refundable</b> ⚠️\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👥 <b>Admins:</b> {admins_text}\n\n"
-        "<i>Copy this form, fill in the details, and send it in this group.</i>"
-    )
-    await update.message.reply_text(form_text, parse_mode="HTML")
-
-async def parse_and_process_form(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ----------------- FORM FILL HANDLER ----------------- #
+async def handle_deal_form(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-    chat_id = update.effective_chat.id
-    message_id = update.message.message_id
+    if not text:
+        return
 
-    # Check if message contains form keywords
-    if "deal amount" in text.lower() and "buyer username" in text.lower() and "seller username" in text.lower():
-        # Extract usernames using regex
-        buyer_match = re.search(r"buyer username\s*:\s*@?([a-zA-Z0-9_]+)", text, re.IGNORECASE)
-        seller_match = re.search(r"seller username\s*:\s*@?([a-zA-Z0-9_]+)", text, re.IGNORECASE)
+    amt_match = re.search(r"(?:amount|deal amount)[:\s]*([0-9]+)", text, re.IGNORECASE)
+    buyer_match = re.search(r"(?:buyer)[:\s]*(@?\w+)", text, re.IGNORECASE)
+    seller_match = re.search(r"(?:seller)[:\s]*(@?\w+)", text, re.IGNORECASE)
 
-        if not buyer_match or not seller_match:
-            await update.message.reply_text("⚠️ Please provide valid usernames (@username) for both Buyer and Seller.")
+    if amt_match:
+        amount = float(amt_match.group(1))
+        if amount < 50:
+            await update.message.reply_text("❌ Minimum deal amount is 50 ₹!")
             return
 
-        buyer_uname = buyer_match.group(1).lower()
-        seller_uname = seller_match.group(1).lower()
+        fee, total = calculate_fee(amount)
+        buyer = buyer_match.group(1) if buyer_match else "Not Mentioned"
+        seller = seller_match.group(1) if seller_match else "Not Mentioned"
 
-        # Pin the user's filled form
-        try:
-            await context.bot.pin_chat_message(chat_id=chat_id, message_id=message_id)
-        except Exception as e:
-            print(f"Pin error: {e}")
-
-        # Store deal state
-        deal_id = str(message_id)
-        active_deals[deal_id] = {
-            "buyer_uname": buyer_uname,
-            "seller_uname": seller_uname,
-            "buyer_agreed": False,
-            "seller_agreed": False,
-            "form_message_id": message_id
+        form_msg_id = update.message.message_id
+        deals_db[form_msg_id] = {
+            "amount": amount,
+            "fee": fee,
+            "total": total,
+            "buyer": buyer,
+            "seller": seller,
+            "admin": None,
+            "status": "pending_admin_approval",
+            "action": None
         }
 
-        # Send Agree buttons in reply
-        keyboard = [
-            [
-                InlineKeyboardButton(f"🛒 @{buyer_uname} (Agree)", callback_data=f"agree_buyer_{deal_id}"),
-                InlineKeyboardButton(f"🏷️ @{seller_uname} (Agree)", callback_data=f"agree_seller_{deal_id}")
-            ]
-        ]
-        await update.message.reply_text(
-            "🤝 <b>Both Agree?</b>\nBoth parties must click their respective button to confirm terms:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="HTML"
+        fee_info = (
+            f"✅ <b>FORM RECEIVED!</b>\n\n"
+            f"💰 <b>Deal Amount:</b> ₹{amount}\n"
+            f"📊 <b>Escrow Fee:</b> ₹{fee}\n"
+            f"💵 <b>Total Amount:</b> ₹{total}\n\n"
+            f"👤 <b>Buyer:</b> {buyer}\n"
+            f"👤 <b>Seller:</b> {seller}\n\n"
+            f"⏳ <i>Waiting for Admin confirmation. Admin must reply to this form with <code>/+deal</code> to initiate.</i>"
         )
+        await update.message.reply_text(fee_info, parse_mode="HTML")
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    data = query.data
-    user = query.from_user
-    current_username = (user.username or "").lower()
-
-    if not data.startswith("agree_"):
+# ----------------- ADMIN COMMAND /+deal ----------------- #
+async def approve_deal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("❌ Please reply to the deal form message with /+deal!")
         return
 
-    parts = data.split("_")
-    role = parts[1]      # "buyer" or "seller"
-    deal_id = parts[2]
+    form_msg = update.message.reply_to_message
+    form_id = form_msg.message_id
+    admin_user = update.effective_user.mention_html()
 
-    if deal_id not in active_deals:
-        await query.answer("❌ This deal has expired or completed.", show_alert=True)
-        return
+    if form_id not in deals_db:
+        deals_db[form_id] = {
+            "amount": "N/A",
+            "fee": "N/A",
+            "total": "N/A",
+            "buyer": "Buyer",
+            "seller": "Seller",
+            "admin": admin_user,
+            "status": "active"
+        }
+    else:
+        deals_db[form_id]["admin"] = admin_user
+        deals_db[form_id]["status"] = "active"
 
-    deal = active_deals[deal_id]
+    # Form pin karne
+    try:
+        await context.bot.pin_chat_message(
+            chat_id=update.effective_chat.id,
+            message_id=form_id
+        )
+    except Exception as e:
+        print(f"Pin Error: {e}")
 
-    if role == "buyer":
-        if current_username != deal["buyer_uname"]:
-            await query.answer("❌ Only the designated Buyer can click this button!", show_alert=True)
-            return
-        if deal["buyer_agreed"]:
-            await query.answer("You have already agreed.", show_alert=True)
-            return
-        deal["buyer_agreed"] = True
-        await query.answer("✅ Buyer agreed!")
-
-    elif role == "seller":
-        if current_username != deal["seller_uname"]:
-            await query.answer("❌ Only the designated Seller can click this button!", show_alert=True)
-            return
-        if deal["seller_agreed"]:
-            await query.answer("You have already agreed.", show_alert=True)
-            return
-        deal["seller_agreed"] = True
-        await query.answer("✅ Seller agreed!")
-
-    # Update button labels to show checkmark on agreement
-    buyer_status = "✅" if deal["buyer_agreed"] else "🛒"
-    seller_status = "✅" if deal["seller_agreed"] else "🏷️"
-
-    updated_keyboard = [
+    # Buttons
+    keyboard = [
         [
-            InlineKeyboardButton(f"{buyer_status} @{deal['buyer_uname']}", callback_data=f"agree_buyer_{deal_id}"),
-            InlineKeyboardButton(f"{seller_status} @{deal['seller_uname']}", callback_data=f"agree_seller_{deal_id}")
+            InlineKeyboardButton("✅ Release", callback_data=f"rel_{form_id}"),
+            InlineKeyboardButton("❌ Refund", callback_data=f"ref_{form_id}")
         ]
     ]
-    await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(updated_keyboard))
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # Check if both parties have agreed
-    if deal["buyer_agreed"] and deal["seller_agreed"]:
-        chat_id = query.message.chat.id
-        admins_text = await get_admin_mentions(context, chat_id)
+    await update.message.reply_text(
+        f"🔒 <b>Deal Approved & Pinned by {admin_user}!</b>\n\n"
+        f"• <b>Buyer:</b> Click <b>Release</b> after receiving the product/service.\n"
+        f"• <b>Seller:</b> Click <b>Refund</b> in case of any cancellation.",
+        reply_markup=reply_markup,
+        parse_mode="HTML"
+    )
 
-        completion_msg = (
-            f"🎉 <b>DEAL CONFIRMED BY BOTH PARTIES!</b>\n\n"
-            f"🛒 <b>Buyer:</b> @{deal['buyer_uname']} ✅\n"
-            f"🏷️ <b>Seller:</b> @{deal['seller_uname']} ✅\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📢 <b>Attention Admins:</b> {admins_text}\n"
-            f"Both parties have agreed to the terms. Please take over and provide payment details."
-        )
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=completion_msg,
-            reply_to_message_id=deal["form_message_id"],
+# ----------------- BUTTON CALLBACK ----------------- #
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    action, form_id_str = data.split("_")
+    form_id = int(form_id_str)
+    user = query.from_user.mention_html()
+
+    deal = deals_db.get(form_id)
+    if not deal:
+        await query.edit_message_text("❌ Deal not found or expired.")
+        return
+
+    admin_tag = deal.get("admin", "Admin")
+
+    if action == "rel":
+        deal["action"] = "Release"
+        await query.message.reply_text(
+            f"📢 <b>Payment Release Requested!</b>\n\n"
+            f"{user} clicked <b>Release</b>.\n"
+            f"👉 <b>Seller: Please send your UPI ID here!</b>\n\n"
+            f"Escrow Admin: {admin_tag}",
             parse_mode="HTML"
         )
-        # Clear deal from memory
-        active_deals.pop(deal_id, None)
+    elif action == "ref":
+        deal["action"] = "Refund"
+        await query.message.reply_text(
+            f"📢 <b>Payment Refund Requested!</b>\n\n"
+            f"{user} clicked <b>Refund</b>.\n"
+            f"👉 <b>Buyer: Please send your UPI ID here!</b>\n\n"
+            f"Escrow Admin: {admin_tag}",
+            parse_mode="HTML"
+        )
 
-# ----------------- MAIN FUNCTION ----------------- #
+# ----------------- DEAL CARD (/deal<number>) ----------------- #
+async def deal_card_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg_text = update.message.text.strip()
+    match = re.match(r"^/deal(\d+)$", msg_text, re.IGNORECASE)
+    if not match:
+        return
+
+    deal_number = match.group(1)
+
+    if not update.message.reply_to_message:
+        await update.message.reply_text("❌ Please reply to the original deal form with this command!")
+        return
+
+    target_id = update.message.reply_to_message.message_id
+    deal = deals_db.get(target_id, {
+        "amount": "N/A",
+        "buyer": "Buyer",
+        "seller": "Seller"
+    })
+
+    admin_name = update.effective_user.mention_html()
+
+    card_text = (
+        f"𝗗𝗘𝗔𝗟 𝗡𝗨𝗠𝗕𝗘𝗥 : #{deal_number}\n"
+        f"𝗔𝗠𝗢𝗨𝗡𝗧 : ₹{deal['amount']}\n"
+        f"𝗘𝗦𝗖𝗥𝗢𝗪𝗘𝗥 : {admin_name}\n"
+        f"𝗕𝗨𝗬𝗘𝗥 : {deal['buyer']}\n"
+        f"𝗦𝗘𝗟𝗟𝗘𝗥 : {deal['seller']}\n\n"
+        f"𝗧𝗛𝗔𝗡𝗞𝗦 𝗙𝗢𝗥 𝗗𝗘𝗔𝗟𝗜𝗡𝗚 & 𝗧𝗥𝗨𝗦𝗧𝗜𝗡𝗚 𝗧𝗢 𝗨𝗦\n"
+        f"𝗬𝗢𝗨𝗥𝗦  - @AUREXESROWS"
+    )
+
+    await update.message.reply_text(card_text, parse_mode="HTML")
+
+# ----------------- MAIN RUNNER ----------------- #
 def main():
-    threading.Thread(target=run_flask, daemon=True).start()
-    app_bot = Application.builder().token(BOT_TOKEN).build()
+    bot_app = Application.builder().token(BOT_TOKEN).build()
 
-    # Form trigger (matches 'form' or command /form)
-    app_bot.add_handler(CommandHandler("form", send_empty_form))
-    app_bot.add_handler(MessageHandler(filters.Regex(r"(?i)^\s*form\s*$"), send_empty_form))
+    bot_app.add_handler(CommandHandler("+deal", approve_deal))
+    bot_app.add_handler(MessageHandler(filters.Regex(r"^/deal\d+"), deal_card_command))
+    bot_app.add_handler(CallbackQueryHandler(button_callback))
+    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_deal_form))
 
-    # Filled form detector
-    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, parse_and_process_form))
-
-    # Agreement button handler
-    app_bot.add_handler(CallbackQueryHandler(button_callback))
-
-    print("Escrow Bot is running...")
-    app_bot.run_polling(drop_pending_updates=True)
+    print("Escrow Bot is running smoothly...")
+    bot_app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
