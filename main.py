@@ -1,19 +1,31 @@
 import os
 import re
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
-    CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
     ContextTypes,
     filters,
 )
 
+# ----------------- FAKE WEB SERVER FOR RENDER ----------------- #
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive!")
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
+
 # ----------------- CONFIGURATION ----------------- #
 BOT_TOKEN = "8600761951:AAEIhkCcWvMxFexkrpHbWH_MPP2T42JbsMs"
 
-# In-memory storage for deals
 deals_db = {}
 
 # ----------------- FEES CALCULATOR ----------------- #
@@ -96,7 +108,6 @@ async def approve_deal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         deals_db[form_id]["admin"] = admin_user
         deals_db[form_id]["status"] = "active"
 
-    # Form pin karne
     try:
         await context.bot.pin_chat_message(
             chat_id=update.effective_chat.id,
@@ -105,7 +116,6 @@ async def approve_deal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"Pin Error: {e}")
 
-    # Buttons
     keyboard = [
         [
             InlineKeyboardButton("✅ Release", callback_data=f"rel_{form_id}"),
@@ -194,6 +204,9 @@ async def deal_card_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ----------------- MAIN RUNNER ----------------- #
 def main():
+    # Web server background madhe chalu karne (Render sathi)
+    threading.Thread(target=run_web_server, daemon=True).start()
+
     bot_app = Application.builder().token(BOT_TOKEN).build()
 
     bot_app.add_handler(MessageHandler(filters.Regex(r"^\/\+deal$"), approve_deal))
